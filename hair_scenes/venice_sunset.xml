@@ -1,0 +1,65 @@
+<scene version='2.2.1'>
+
+  <integrator type="path"/>
+
+  <sensor type="perspective">
+
+    <transform name="to_world">
+      <lookat target="15, 5, 0.0"
+              origin="-155, 0, -185"
+              up    ="0.0, 1.0, 0.0"/>
+    </transform>
+
+    <film type="hdrfilm">
+      <integer name="width" value="1500"/>
+      <integer name="height" value="1000"/>
+      <string name="pixel_format" value="rgb"/>
+      <string name="component_format" value="float32"/>
+      <rfilter type="gaussian"/>
+    </film>
+
+    <sampler type="ldsampler">
+      <integer name="sample_count" value="1024"/>
+    </sampler>
+  </sensor>
+
+  <!-- envmap -->
+  <emitter type="envmap">
+    <transform name="to_world">
+      <rotate y="1" angle="0"/>
+    </transform>
+    <float name="scale" value="1.5"/>
+    <string name="filename" value="textures/venice_sunset.exr"/>
+  </emitter>
+
+  <!-- hair -->
+  <shape type="hair">
+    <transform name="to_world">
+      <rotate x="1" angle="-90"/>
+      <translate  y="-5"/>
+      <rotate y="1" angle="90"/>
+    </transform>
+    <string name="filename" value="meshes/wCurly.hair"/>
+    <bsdf type="roughhair">
+      <string name="distribution" value="beckmann"/>
+      <float name="tilt" value="-3"/>
+      <float name="eumelanin" value="0.024"/>
+      <float name="pheomelanin" value="1.8"/>
+      <float name="roughness" value="0.1"/>
+    </bsdf>
+  </shape>
+
+  <!-- woman head -->
+  <shape type="obj">
+    <transform name="to_world">
+      <rotate x="1" angle="-90"/>
+      <translate y="-5"/>
+      <rotate y="1" angle="90"/>
+    </transform>
+    <string name="filename" value="meshes/woman.obj"/>
+    <bsdf type="diffuse">
+      <float name="reflectance" value="1"/>
+    </bsdf>
+  </shape>
+
+</scene>

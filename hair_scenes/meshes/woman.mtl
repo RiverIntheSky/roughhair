@@ -1,0 +1,29 @@
+# Max2Mtl Version 4.0 Mar 10th, 2001
+#
+newmtl Material__11
+map_Kd head.tga
+Ka  0.0 0.0 0.0
+Kd  1.0 1.0 1.0
+Ks  0.3 0.3 0.3
+d  1.0
+Ns  10.0
+illum 2
+#
+newmtl Material__12
+Ka  0.0 0.0 0.0
+Kd  0.0 0.0 0.0
+Ks  0.0 0.0 0.0
+d  1.0
+Ns  10.0
+illum 2
+#
+newmtl 02_-_Default
+map_Kd eye.tga
+Ka  0.0 0.0 0.0
+Kd  1.0 1.0 1.0
+Ks  0.9 0.9 0.9
+d  1.0
+Ns  50.0
+illum 2
+#
+# EOF
