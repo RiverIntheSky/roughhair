@@ -231,9 +231,9 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 		} else { /* Bézier spline */
 		    size_t depth;
 		    if (si == 0) {
-			depth = max(0, floor(log2(norm(p1 - p0) * 12.f))); /* subdivision depth */
+			depth = max(0, floor(log2(norm(p1 - p0) * 6.f))); /* subdivision depth */
 		    } else {
-			depth = max(0, floor(log2(norm(p1 - p2) * 12.f))); /* subdivision depth */
+			depth = max(0, floor(log2(norm(p1 - p2) * 6.f))); /* subdivision depth */
 		    }
 		    size_t num_sub_seg = pow(2, (int)depth);
 		    ScalarFloat dtheta = 0.5f * Pi / ScalarFloat(num_sub_seg);
