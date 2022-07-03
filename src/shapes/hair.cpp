@@ -34,55 +34,39 @@ Hair (:monosp:`hair`)
    - |transform|
    - Specifies an optional linear object-to-world transformation. Note that non-uniform scales are
    not permitted! (Default: none, i.e. object space = world space)
- * - is_cylinder
-   - |boolean|
-   - This is set to true only when brute-force tracing roughcylinder material
+ * - a
+   - |float|
+   - semi-major axis
+ * - b
+   - |float|
+   - semi-minor axis
 
    This shape plugin describes the Cem Yuksel hair geometry retrieved
-   from http://www.cemyuksel.com/research/hairmodels/, with hairsegment primitives,
+   from http://www.cemyuksel.com/research/hairmodels/, with elliptical hairsegment primitives,
    and subdivided segments computed via Bézier interpolations splines
    (http://www.cemyuksel.com/research/interpolating_splines).
-
+   The semi-minor axis of the ellipse is aligned with the curvature vector
    A simple example for instantiating a hair shape:
 
    .. code-block:: xml
 
     <shape type="hair">
-        <transform name="to_world">
-            <rotate x="1" angle="-90"/>
-            <translate y="-5"/>
-            <rotate y="1" angle="-90"/>
-        </transform>
-        <string name="filename" value="meshes/wCurly.hair"/>
-        <bsdf type="roughhair">
-            <string name="distribution" value="ggx"/>
-            <float name="tilt" value="-3"/>
-            <float name="eumelanin" value="0.02"/>
-            <float name="pheomelanin" value="1.5"/>
-            <float name="roughness" value="0.1"/>
-        </bsdf>
-   </shape>
-
-  For instantiating a hair shape with roughcylinder material:
-
-  .. code-block:: xml
-
-   <shape type="hair">
-        <boolean name="is_cylinder" value="true"/>
-        <transform name="to_world">
-            <rotate x="1" angle="-90"/>
-            <translate y="-5"/>
-            <rotate y="1" angle="-90"/>
-        </transform>
-        <string name="filename" value="meshes/wCurly.hair"/>
-        <bsdf type="roughcylinder">
-            <string name="distribution" value="beckmann"/>
-	    <float name="eumelanin" value="0.02"/>
-            <float name="pheomelanin" value="1.5"/>
-	    <float name="alpha" value="0.1"/>
-            <float name="beta" value="-3"/>
-        </bsdf>
-   </shape>
+    <transform name="to_world">
+        <rotate x="1" angle="-90"/>
+        <translate y="-5"/>
+        <rotate y="1" angle="-90"/>
+    </transform>
+    <float name="a" value="0.05"/>
+    <float name="b" value="0.03"/>
+    <string name="filename" value="meshes/wCurly.hair"/>
+    <bsdf type="roughhair">
+        <string name="distribution" value="ggx"/>
+        <float name="tilt" value="-3"/>
+        <float name="eumelanin" value="0.02"/>
+        <float name="pheomelanin" value="1.5"/>
+        <float name="roughness" value="0.1"/>
+    </bsdf>
+  </shape>
 */
 
 
@@ -129,12 +113,6 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 	stream->read(m_points_before_transform, sizeof(float) * m_header.point_count * 3);
     }
 
-    // Read thickness array
-    if (m_header.arrays & _CY_HAIR_FILE_THICKNESS_BIT ) {
-	m_thickness = new float[m_header.point_count];
-        stream->read(m_thickness, sizeof(float) * m_header.point_count);
-    }
-
     // Read transparency array
     if (m_header.arrays & _CY_HAIR_FILE_TRANSPARENCY_BIT ) {
 	m_transparency = new float[m_header.point_count];
@@ -156,18 +134,9 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 						     m_points_before_transform[3*i+2]);
     }
 
-    // apply transformation to radius
-    if (m_thickness) {
-	for (size_t i = 0; i < m_header.point_count; i++)
-	    m_radius = m_thickness[i] * S[0][0];
-    } else {
-	m_radius = m_header.d_thickness * S[0][0];
-    }
-    m_radius *= 0.5f;
-
-    // whether the intersection primitive is a cylinder (for near-field)
-    // or a ray-facing stripe (for far-field)
-    bool is_cylinder = props.bool_("is_cylinder", false);
+    // apply transformation to axes
+    m_a = props.float_("a", 0.05f) * S[0][0]; /* semi-major axis */
+    m_b = props.float_("b", 0.03f) * S[0][0]; /* semi-minor axis */
 
     size_t p = 0; // point index
     for (size_t hi = 0; hi < m_header.hair_count; hi++){ // iterating hair strands
@@ -213,15 +182,23 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 			ScalarPoint3f C1 = lerp(F11, F21, s1_sqr);
 			ScalarPoint3f C2 = lerp(F12, F22, s2_sqr);
 
-			if (is_cylinder) {
-			    ref<CylinderSegment<Float, Spectrum>> hair_seg
-				= new CylinderSegment<Float, Spectrum>(C1, C2, m_radius, props);
-			    m_kdtree->add_shape(hair_seg);
-			} else {
-			    ref<HairSegment<Float, Spectrum>> hair_seg
-				= new HairSegment<Float, Spectrum>(C1, C2, m_radius, props);
-			    m_kdtree->add_shape(hair_seg);
-			}
+			auto [st, ct] = sincos(thetamid);
+			auto ct_sqr = sqr(ct);
+			auto st_sqr = 1.f - ct_sqr;
+			auto [F1, F1_, F1__] = get_bezier123(thetamid + 0.5f * Pi, p0, b1, p2, s11, s12);
+			auto [F2, F2_, F2__] = get_bezier123(thetamid, p1, b2, p3, s21, s22);
+
+			/* first order derivative */
+			ScalarVector3f C_ = 2.f * ct * st * (F2 - F1) + ct_sqr * F1_ + st_sqr * F2_;
+			/* second order derivative */
+			ScalarVector3f C__ = 2.f * (ct_sqr - st_sqr) * (F2 - F1)
+			    + 4.f * ct * st * (F2_ - F1_)
+			    + ct_sqr * F1__ + st_sqr * F2__;
+			/* binormal vector */
+			ScalarVector3f x = cross(C_, C__);
+			ref<HairSegment<Float, Spectrum>> hair_seg
+			    = new HairSegment<Float, Spectrum>(C1, C2, x, m_a, m_b, props);
+			m_kdtree->add_shape(hair_seg);
 		    }
 		    p0 = p1;
 		    p1 = p2;
@@ -231,9 +208,9 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 		} else { /* Bézier spline */
 		    size_t depth;
 		    if (si == 0) {
-			depth = max(0, floor(log2(norm(p1 - p0) * 12.f))); /* subdivision depth */
+			depth = max(0, floor(log2(norm(p1 - p0) * 6.f))); /* subdivision depth */
 		    } else {
-			depth = max(0, floor(log2(norm(p1 - p2) * 12.f))); /* subdivision depth */
+			depth = max(0, floor(log2(norm(p1 - p2) * 6.f))); /* subdivision depth */
 		    }
 		    size_t num_sub_seg = pow(2, (int)depth);
 		    ScalarFloat dtheta = 0.5f * Pi / ScalarFloat(num_sub_seg);
@@ -254,15 +231,12 @@ MTS_VARIANT Hair<Float, Spectrum>::Hair(const Properties &props):
 			ScalarPoint3f F11 = get_bezier_point(p0, b1, p2, t11);
 			ScalarPoint3f F12 = get_bezier_point(p0, b1, p2, t12);
 
-			if (is_cylinder) {
-			    ref<CylinderSegment<Float, Spectrum>> hair_seg
-				= new CylinderSegment<Float, Spectrum>(F11, F12, m_radius, props);
-			    m_kdtree->add_shape(hair_seg);
-			} else {
-			    ref<HairSegment<Float, Spectrum>> hair_seg
-				= new HairSegment<Float, Spectrum>(F11, F12, m_radius, props);
-			    m_kdtree->add_shape(hair_seg);
-			}
+			auto [F1, F1_, F1__] = get_bezier123(thetamid + 0.5f * Pi, p0, b1, p2, s11, s12);
+			ScalarVector3f x = cross(F1_, F1__);
+
+			ref<HairSegment<Float, Spectrum>> hair_seg
+			    = new HairSegment<Float, Spectrum>(F11, F12, x, m_a, m_b, props);
+			m_kdtree->add_shape(hair_seg);
 		    }
 		}
 	    }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "hairsegment.h"
-#include "cylindersegment.h"
 #include <mitsuba/render/shape.h>
 #include <mitsuba/render/kdtree.h>
 #include <mitsuba/core/fstream.h>
@@ -138,11 +137,10 @@ private:
     Header m_header;
     unsigned short* m_segments;
     float* m_points_before_transform;
-    float* m_thickness;
     float* m_transparency;
     float* m_colors;
     ScalarPoint3f* m_points;
-    ScalarFloat m_radius;
+    ScalarFloat m_a, m_b;
 };
 
 NAMESPACE_END(mitsuba)

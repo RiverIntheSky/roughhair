@@ -64,6 +64,8 @@ Rough hair material (:monosp:`roughhair`)
 
 
 This plugin implements a microfacet-based hair scattering model.
+The geometry data (semi-major and semi-minor axes) are read from
+the intersection data stored in si.dn_du.
 This is the implementation of the paper *A Microfacet-based Hair Scattering Model*
 by Huang et al. [2022]
 
@@ -105,17 +107,11 @@ public:
         m_eta = int_ior / ext_ior;
 	m_inv_eta = ext_ior / int_ior;
 
-	// whether to use analytical integration of Microfacet distribution function
-	m_analytical = props.bool_("analytical", false);
-
 	// roughness
         if (props.has_property("distribution")) {
             std::string distr = string::to_lower(props.string("distribution"));
-            if (distr == "beckmann") {
+            if (distr == "beckmann")
                 m_type = MicrofacetType::Beckmann;
-		if (m_analytical)
-		    Log(Warn, "Analytical solution of the R lobe exists only for GGX distribution");
-	    }
             else if (distr == "ggx")
                 m_type = MicrofacetType::GGX;
             else
@@ -162,6 +158,19 @@ public:
 	return sintheta(w) / costheta(w);
     }
 
+    MTS_INLINE Float sinphi(const Vector3f& w) const {
+	return w.x() / costheta(w);
+    }
+
+    MTS_INLINE Float cosphi(const Vector3f& w) const {
+	return w.z() / costheta(w);
+    }
+
+    MTS_INLINE std::pair<Float, Float> sincosphi(const Vector3f& w) const {
+	Float cos_theta = costheta(w);
+	return {w.x() / cos_theta, w.z() / cos_theta};
+    }
+
     /* extract theta coordinate from 3D direction
      * -pi < theta < pi */
     MTS_INLINE Float dir_theta(const Vector3f& w) const {
@@ -183,10 +192,10 @@ public:
     }
 
     /* compute the vector direction given spherical coordinates */
-    MTS_INLINE Vector3f sph_dir(Float theta, Float gamma) const {
+    MTS_INLINE Vector3f sph_dir(Float theta, Float phi) const {
 	auto [sin_theta, cos_theta] = sincos(theta);
-	auto [sin_gamma,   cos_gamma]   = sincos(gamma);
-	return Vector3f(sin_gamma * cos_theta, sin_theta, cos_gamma * cos_theta);
+	auto [sin_phi,   cos_phi]   = sincos(phi);
+	return Vector3f(sin_phi * cos_theta, sin_theta, cos_phi * cos_theta);
     }
 
     /* get waveleingths of the ray */
@@ -210,6 +219,38 @@ public:
     /* eumelanin absorption coefficient */
     MTS_INLINE Spectrum eumelanin(const Spectrum &lambda) const {
 	return 6.6e8f * pow(lambda, -3.33f); // adjusted relative to 0.1mm hair width
+    }
+
+    /* get semi major axis, semi minor axis and squared eccentricity */
+    MTS_INLINE std::tuple<Float, Float, Float> get_abe2(const SurfaceInteraction3f &si) const {
+	return {si.dn_du.x(), si.dn_du.y(), si.dn_du.z()};
+    }
+
+    /* convert between gamma and phi */
+    MTS_INLINE Float to_phi(Float gamma, Float a, Float b) const {
+	auto [sin_gamma, cos_gamma] = sincos(gamma);
+	return atan2(b * sin_gamma, a * cos_gamma);
+    }
+
+    MTS_INLINE Float to_gamma(Float phi, Float a, Float b) const {
+	auto [sin_phi, cos_phi] = sincos(phi);
+	return atan2(a * sin_phi, b * cos_phi);
+    }
+
+    MTS_INLINE Point2f to_point(Float gamma, Float a, Float b) const {
+	auto [sg, cg] = sincos(gamma);
+	return Point2f(a * sg, b * cg);
+    }
+
+    /* given theta and gamma, convert to vector */
+    MTS_INLINE Vector3f sphg_dir(Float theta, Float gamma, Float a, Float b) const {
+	auto [sin_theta, cos_theta] = sincos(theta);
+	auto [sin_gamma,   cos_gamma]   = sincos(gamma);
+	Float tan_gamma = sin_gamma / cos_gamma;
+	Float tan_phi = b / a * tan_gamma;
+	Float cos_phi = enoki::mulsign(rsqrt(sqr(tan_phi) + 1.f), cos_gamma);
+	Float sin_phi = cos_phi * tan_phi;
+	return Vector3f(sin_phi * cos_theta, sin_theta, cos_phi * cos_theta);
     }
 
     /* sample microfacets from a tilted mesonormal */
@@ -276,7 +317,6 @@ public:
 	return (dot(v, h) > 0 && dot(v, m) > 0);
     }
 
-
     // smith_g1 / dot(v, m)
     Float smith_g1_visible(const Vector3f &v, const Normal3f &m, const Normal3f &h) const {
 	Float cos_vm = dot(v, m),
@@ -323,23 +363,28 @@ public:
            roughness values at the current surface position. */
         MicrofacetDistribution distr(m_type, m_roughness, m_sample_visible);
 
-	// generate sample
+	// generate samples
 	Float sample_lobe = sample1;
 	Float sample_h = const_cast<Sampler&>(*m_sampler).next_1d(active);
 	Point2f sample_h1 = sample2;
 	Point2f sample_h2 = const_cast<Sampler&>(*m_sampler).next_2d(active);
 	Point2f sample_h3 = const_cast<Sampler&>(*m_sampler).next_2d(active);
 
+	// get geometry data from surface interaction
+	auto [a, b, e2] = get_abe2(si);
 
-        // Float sin_phi_mi = si.dn_du.x();	  /* Use offset h directly from intersection data */
-	Float sin_phi_mi = sample_h * 2.f - 1.f;  /* Sample offset h = -sin(phi_m)*/
-	Float cos_phi_mi = safe_sqrt(1.f - sqr(sin_phi_mi));
+	auto [sin_phi_i, cos_phi_i] = sincosphi(si.wi);
+
+	Float d_i = sqrt(1.f - e2 * sqr(sin_phi_i));
+	Float h = d_i * (sample_h * 2.f - 1.f);
+	Float gamma_mi = atan2(cos_phi_i, - b / a * sin_phi_i) - acos(h * rsqrt(sqr(cos_phi_i) + sqr(b / a * sin_phi_i)));
+	auto [sin_gamma_mi, cos_gamma_mi] = sincos(gamma_mi);
+	Normal3f wmi_ = normalize(Normal3f(b * sin_gamma_mi, 0.f, a * cos_gamma_mi)); /* macronormal */
 	auto [st, ct] = sincos(m_tilt);
-	Normal3f wmi(sin_phi_mi * ct, st, cos_phi_mi * ct); /* mesonormal */
-	Normal3f wmi_(sin_phi_mi, 0.f, cos_phi_mi); /* macronormal */
+	Normal3f wmi(wmi_.x() * ct, st, wmi_.z() * ct); /* mesonormal */
 
 	if (dot(wmi, si.wi) < 0 || dot(wmi_, si.wi) < 0)
-	  return {bs, 0.f}; /* macro/mesonormal invisible */
+	    return {bs, 0.f}; /* macro/mesonormal invisible */
 
         // sample R lobe
 	auto [wh1, pdfh1] = sample_wh(si.wi, wmi, distr, sample_h1);
@@ -356,10 +401,9 @@ public:
 	// sample TT lobe
 	Vector3f wt = refract(si.wi, wh1, cos_theta_t1, eta_ti1);
 	Float phi_t = dir_phi(wt);
-	Float phi_mi = atan2f(sin_phi_mi, cos_phi_mi);
-	Float phi_mt = 2.f * phi_t - phi_mi;
-	Normal3f wmt = sph_dir(-m_tilt, phi_mt);
-	Normal3f wmt_ = sph_dir(0, phi_mt);
+	Float gamma_mt = 2.f * to_phi(phi_t, a, b) - gamma_mi;
+	Vector3f wmt = sphg_dir(-m_tilt, gamma_mt, a, b);
+	Vector3f wmt_ = sphg_dir(0, gamma_mt, a, b);
 	auto [wh2, pdfh2] = sample_wh(-wt, wmt, distr, sample_h2);
 	Vector3f wtr = reflect(wt, wh2);
 
@@ -378,18 +422,19 @@ public:
 	/* absorption */
 	Spectrum wavelengths = get_spectrum(si);
 	Spectrum mu_a = fmadd(m_pheomelanin, pheomelanin(wavelengths),
-					m_eumelanin * eumelanin(wavelengths));
-	Float cos_gamma_t = -cos(phi_t - phi_mi);
-	Float cos_theta_wt = sqrt(1.f - sqr(wt.y()));
-	Spectrum A_t = exp(-mu_a * (2.f * cos_gamma_t / cos_theta_wt));
+			      m_eumelanin * eumelanin(wavelengths));
+	Point2f pi = to_point(gamma_mi, a, b);
+	Point2f pt = to_point(gamma_mt + Pi, a, b);
+	/* divide by 0.05 (* 20) because the absorption is defined for hair width 0.1 */
+	Spectrum A_t = exp(-mu_a * norm(pi - pt) * 20.f / costheta(wt));
 
 	Spectrum TT = select(active_tt, T1 * A_t * T2, 0.f);
 
 	// sample TRT lobe
 	Float phi_tr = dir_phi(wtr);
-	Float phi_mtr = phi_mi - 2.f * (phi_t - phi_tr) + Pi;
-	Normal3f wmtr = sph_dir(-m_tilt, phi_mtr);
-	Normal3f wmtr_ = sph_dir(0, phi_mtr);
+	Float gamma_mtr = gamma_mi - 2.f * (to_phi(phi_t, a, b) - to_phi(phi_tr, a, b)) + Pi;
+	Normal3f wmtr = sphg_dir(-m_tilt, gamma_mtr, a, b);
+	Normal3f wmtr_ = sphg_dir(0, gamma_mtr, a, b);
 	auto [wh3, pdfh3] = sample_wh(wtr, wmtr, distr, sample_h3);
 
 	/* fresnel coefficient */
@@ -399,9 +444,9 @@ public:
 	active_trt &= (dot(wtr, wh3) > 0 && dot(wmtr, wtr) > 0 && dot(wtrt, wmtr) < 0 && pdfh3 > 0
 		       && G_(wtr, -wtrt, Normal3f(wmtr.x(), 0.f, wmtr.z()), wh3) > 0);
 	Spectrum T3 = 1.f - R3;
-	Float cos_gamma_t2 = -cos(phi_tr - phi_mt);
-	Float cos_theta_wtr = sqrt(1.f - sqr(wtr.y()));
-	Spectrum A_tr = exp(-mu_a * (2.f * cos_gamma_t2 / cos_theta_wtr));
+	Point2f ptr = to_point(gamma_mtr + Pi, a, b);
+	/* divide by 0.05 (* 20) because the absorption is defined for hair width 0.1 */
+	Spectrum A_tr = exp(-mu_a * norm(pt - ptr) * 20.f / costheta(wtr));
 	Spectrum TRT = select(active_trt, T1 * R2 * T3 * A_t * A_tr, 0.f);
 
 	// select lobe based on energy
@@ -419,8 +464,8 @@ public:
 
         bs.wo = select(selected_r, wr, select(selected_tt, wtt, wtrt));
         bs.eta = 1.f;
-        bs.sampled_component = 0;
-        bs.sampled_type = +BSDFFlags::GlossyReflection;
+	bs.sampled_component = 0;
+	bs.sampled_type = +BSDFFlags::GlossyReflection;
 
         UnpolarizedSpectrum weight =
 	    select(selected_r, R / r * total_energy,
@@ -461,21 +506,23 @@ public:
     }
 
     /* evaluate the R lobe */
-    Spectrum eval_r(const Vector3f &wi, const Vector3f &wo) const {
-	UnpolarizedSpectrum R = 0.f;
+    Spectrum eval_r(const SurfaceInteraction3f &si, const Vector3f &wo_) const {
+	auto [a, b, e2] = get_abe2(si);
+
+	// in mitsuba we trace ray from the camera
+	Vector3f wo = si.wi;
+	Vector3f wi = wo_;
+	Float phi_i = dir_phi(wi);
+	Float phi_o = dir_phi(wo);
 
 	Vector3f wh = normalize(wi + wo);
 
-	Float phi_o = dir_phi(wo);
-	Float phi_h = dir_phi(wh);
-
 	// compute valid phi_mi
 	/* dot(wi, wmi) > 0 */
-	Float phi_m_max1 = acos(max(-m_tan_tilt * tantheta(wi), 0));
-
+	Float phi_m_max1 = acos(max(-m_tan_tilt * tantheta(wi), 0)) + phi_i;
 	if (enoki::isnan(phi_m_max1))
 	    return 0.f;
-	Float phi_m_min1 = -phi_m_max1;
+	Float phi_m_min1 = -phi_m_max1 + 2.f * phi_i;
 
 	/* dot(wo, wmi) > 0 */
 	Float phi_m_max2 = acos(max(-m_tan_tilt * tantheta(wo), 0)) + phi_o;
@@ -483,95 +530,80 @@ public:
 	    return 0.f;
 	Float phi_m_min2 = -phi_m_max2 + 2.f * phi_o;
 
-	Float phi_m_min = max(phi_m_min1, phi_m_min2) + 1e-5f;
-	Float phi_m_max = min(phi_m_max1, phi_m_max2) - 1e-5f;
+	/* try to wrap range */
+	if ((phi_m_max2 - phi_m_min1) > TwoPi) {
+	    phi_m_min2 -= TwoPi; 	    phi_m_max2 -= TwoPi;
+	}
+	if ((phi_m_max1 - phi_m_min2) > TwoPi) {
+	    phi_m_min1 -= TwoPi; 	    phi_m_max1 -= TwoPi;
+	}
+
+	Float phi_m_min = max(phi_m_min1, phi_m_min2) + 0.001f;
+	Float phi_m_max = min(phi_m_max1, phi_m_max2) - 0.001f;
 
 	if (phi_m_min > phi_m_max)
 	    return 0.f;
 
+	Float gamma_m_min = to_gamma(phi_m_min, a, b);
+	Float gamma_m_max = to_gamma(phi_m_max, a, b);
+
+	if (gamma_m_max < gamma_m_min)
+	    gamma_m_max += TwoPi;
+
 	Float integral = 0.f;
-	Float d_max = phi_h - phi_m_max;
-	Float d_min = phi_h - phi_m_min;
-	if (m_analytical && m_type == MicrofacetType::GGX) { // TODO: beckmann
-	    if (m_tilt == 0.f) {
-		Float A = (m_roughness_squared - 1) * sqr(costheta(wh));
-		Float temp1 = A * rcp(A + 1) * (sin(2*d_max) * rcp(A*cos(2*d_max)+A+2.f) - sin(2*d_min) * rcp(A*cos(2*d_min)+A+2.f));
-		Float temp2 = (A + 2) * pow(A + 1, Float(-1.5)) * (atan(tan(d_min)*rsqrt(A + 1)) - atan(tan(d_max)*rsqrt(A + 1)));
-		integral = temp1 + temp2;
-	    } else {
-		auto [sm, cm] = sincos(m_tilt);
-		Float C = sqrt(1.f - m_roughness_squared);
-		Float A = cm * costheta(wh) * C;
-		Float B = sm * sintheta(wh) * C;
-		Float A2 = sqr(A);
-		Float B2 = sqr(B);
-		Float tmp1 = rsqrt(sqr(B - 1.f) - A2);
-		Float tmp2 = rsqrt(sqr(B + 1.f) - A2);
 
-		auto [smax, cmax] = sincos(d_max);
-		auto [smin, cmin] = sincos(d_min);
-		Float tmax = smax / (1.f + cmax);
-		Float tmin = smin / (1.f + cmin);
-
-		Float temp1 = 2.f * (A2 - B2 + 3.f*B - 2) * sqr(tmp1) * tmp1 *
-		    (atan((A - B + 1.f) * tmp1 * tmax) -
-		     atan((A - B + 1.f) * tmp1 * tmin));
-		Float temp2 = 2.f * (A2 - B2 - 3.f*B - 2) * sqr(tmp2) * tmp2 *
-		    (atan((B - A + 1.f) * tmp2 * tmax) -
-		     atan((B - A + 1.f) * tmp2 * tmin));
-		Float temp3 = A * sqr(tmp1) *
-		    (smax / (A * cmax + B - 1.f) -
-		     smin / (A * cmin + B - 1.f));
-		Float temp4 = A * sqr(tmp2) *
-		    (smax / (A * cmax + B + 1.f) -
-		     smin / (A * cmin + B + 1.f));
-
-		integral = 0.5f * (temp1 + temp2 + temp3 + temp4);
-	    }
-	    integral *= m_roughness_squared * math::InvTwoPi<Float>;
-	} else { /* falls back to numerical integration */
-	    /* initial sample resolution */
-	    Float res = m_roughness * .7f;
-	    Float scale = (phi_m_max - phi_m_min) * .5f;
-	    size_t intervals = 2 * ceil(scale/res) + 1;
-	    /* modified resolution based on integral domain */
-	    res = (phi_m_max - phi_m_min) / Float(intervals);
-	    // integrate using Simpson's rule
-	    for (size_t i = 0; i < intervals; i++) {
-		Float phi_m = phi_m_min + i * res;
-		Vector3f wm = sph_dir(m_tilt, phi_m);
-		Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
-		integral += weight * D(wm, wh) * G(wi, wo, wm, wh) * G_(wi, wo, Normal3f(wm.x(), 0.f, wm.z()), wh);
-	    }
-	    integral *= (2.f / 3.f * res);
+	/* initial sample resolution */
+	Float res = m_roughness * .7f;
+	Float scale = (gamma_m_max - gamma_m_min) * .5f;
+	size_t intervals = 2 * ceil(scale/res) + 1;
+	/* modified resolution based on integral domain */
+	res = (gamma_m_max - gamma_m_min) / Float(intervals);
+	// integrate using Simpson's rule
+	for (size_t i = 0; i < intervals; i++) {
+	    Float gamma_m = gamma_m_min + i * res;
+	    Vector3f wm = sphg_dir(m_tilt, gamma_m, a, b);
+	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
+	    Float arc_length = sqrt(1.f - e2 * sqr(sin(gamma_m)));
+	    integral += weight * D(wm, wh) * G(wi, wo, wm, wh) * arc_length
+		* G_(wi, wo, Normal3f(wm.x(), 0.f, wm.z()), wh);
 	}
+	integral *= (2.f / 3.f * res);
 
 	Float F = std::get<0>(fresnel(dot(wi, wh), Float(m_eta)));
-	R = 0.125f * F * max(0.f, integral);
+	Float d_o_inv = rsqrt(1.f - e2 * sqr(sin(phi_o)));
+	UnpolarizedSpectrum R = 0.125f * F * integral * d_o_inv;
 
 	return R;
     }
 
     /* evaluate TT + TRT lobe */
     Spectrum eval_tt_trt(const SurfaceInteraction3f & si,
-			 const Vector3f& wo) const {
+			 const Vector3f& wo_) const {
+	Vector3f wo = si.wi;
+	Vector3f wi = wo_;
+	Float phi_i = dir_phi(wi);
+	Float phi_o = dir_phi(wo);
+
 	/* dot(wi, wmi) > 0 */
-	Float phi_m_max = acos(max(-m_tan_tilt * tantheta(si.wi), 0));
+	Float phi_m_max = acos(max(-m_tan_tilt * tantheta(wi), 0)) + phi_i;
 	if (enoki::isnan(phi_m_max))
 	    return 0.f;
-	Float phi_m_min = -phi_m_max;
+	Float phi_m_min = -phi_m_max + 2.f * phi_i;
 
 	/* dot(wo, wmo) < 0 */
 	Float tmp1 = acos(min(m_tan_tilt * tantheta(wo), 0.f)); //x
 	if (enoki::isnan(tmp1))
 	    return 0.f;
 
+	// get geometry data from surface interaction
+	auto [a, b, e2] = get_abe2(si);
+
 	ScalarFloat res = m_roughness * .8f;
 
 	/* absorption */
 	Spectrum wavelengths = get_spectrum(si);
 	Spectrum mu_a = fmadd(m_pheomelanin, pheomelanin(wavelengths),
-					m_eumelanin * eumelanin(wavelengths));
+			      m_eumelanin * eumelanin(wavelengths));
 
 	/* Construct a microfacet distribution matching the
 	   roughness values at the current surface position.
@@ -582,39 +614,49 @@ public:
 	    distr = MicrofacetDistribution(m_type, m_roughness, false);
 	}
 
-	Float scale = (phi_m_max - phi_m_min) * .5f;
+	Float gamma_m_min = to_gamma(phi_m_min, a, b);
+	Float gamma_m_max = to_gamma(phi_m_max, a, b);
+	if (gamma_m_max < gamma_m_min)
+	    gamma_m_max += TwoPi;
+
+	Float scale = (gamma_m_max - gamma_m_min) * .5f;
 	size_t intervals = 2 * ceil(scale/res) + 1;
-	res = (phi_m_max - phi_m_min)/intervals;
+	res = (gamma_m_max - gamma_m_min)/intervals;
 	UnpolarizedSpectrum S_tt = 0.f, S_trt = 0.f;
 	for (size_t i = 0; i < intervals; i++) {
-	    Float phi_mi = phi_m_min + i * res;
-	    Normal3f wmi = sph_dir(m_tilt, phi_mi);
+	    Float gamma_mi = gamma_m_min + i * res;
+	    Normal3f wmi = sphg_dir(m_tilt, gamma_mi, a, b);
+	    Normal3f wmi_ = sphg_dir(0.f, gamma_mi, a, b);
 
 	    /* sample wh1 */
 	    Point2f sample1 = const_cast<Sampler&>(*m_sampler).next_2d(true);
-	    Normal3f wh1 = std::get<0>(sample_wh(si.wi, wmi, distr, sample1));
+	    Normal3f wh1 = std::get<0>(sample_wh(wi, wmi, distr, sample1));
 
-	    Float cos_ih1 = dot(si.wi, wh1);
+	    Float cos_ih1 = dot(wi, wh1);
 	    if (!(cos_ih1 > 1e-5f))
 		continue;
 
 	    /* fresnel coefficient */
-	    auto [R1, cos_theta_t1, eta_it1, eta_ti1] = fresnel(dot(si.wi, wh1), Float(m_eta));
+	    auto [R1, cos_theta_t1, eta_it1, eta_ti1] = fresnel(dot(wi, wh1), Float(m_eta));
 	    Float T1 = 1.f - R1;
 
 	    /* refraction at the first interface */
-	    Vector3f wt = refract(si.wi, wh1, cos_theta_t1, eta_ti1);
+	    Vector3f wt = refract(wi, wh1, cos_theta_t1, eta_ti1);
 	    Float phi_t = dir_phi(wt);
-	    Float phi_mt = 2.f * phi_t - phi_mi;
-	    Vector3f wmt = sph_dir(-m_tilt, phi_mt);
+	    Float gamma_mt = 2.f * to_phi(phi_t, a, b) - gamma_mi;
+	    Vector3f wmt = sphg_dir(-m_tilt, gamma_mt, a, b);
+	    Vector3f wmt_ = sphg_dir(0, gamma_mt, a, b);
 
 	    /* Simpson's rule weight */
 	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
 
 	    Normal3f wh2;
-	    Spectrum A_t = exp(mu_a * 2.f * cos(phi_t - phi_mi) / costheta(wt));
-	    Float G1 = G(si.wi, -wt, wmi, wh1);
-	    if (G1 == 0 || G_(si.wi, -wt, Normal3f(wmi.x(), 0.f, wmi.z()), wh1) == 0)
+	    Point2f pi = to_point(gamma_mi, a, b);
+	    Point2f pt = to_point(gamma_mt + Pi, a, b);
+	    /* divide by 0.05 (* 20) because the absorption is defined for hair width 0.1 */
+	    Spectrum A_t = exp(-mu_a * norm(pi - pt) * 20.f / costheta(wt));
+	    Float G1 = G(wi, -wt, wmi, wh1);
+	    if (G1 == 0 || G_(wi, -wt, wmi_, wh1) == 0)
 		continue;
 
 	    if (dot(wo, wt) < m_inv_eta - 1e-5f) /* total internal reflection */
@@ -631,28 +673,16 @@ public:
 		Float dot_wt_wh2 = dot(-wt, wh2);
 		Float T2 = 1.f - std::get<0>(fresnel(dot_wt_wh2, Float(m_inv_eta)));
 		Float D2 = D(wh2, wmt) * G(-wt, -wo, wmt, wh2);
-
-		/* integrand_of_S_tt / pdf_of_sampling_wt */
-		// Spectrum result;
-		// if (distr.sample_visible()) {
-		//     result = T1 * T2 * smith_g1(-wt, wmi, wh1) * D2 * A_t
-		// 	* dot(si.wi, wmi)
-		// 	* dot_wt_wh2 * dot(wo, wh2) * sqr(rcp_norm_wh2)
-		// 	* rcp(dot(wt, wmi)) * weight;
-		// } else {
-		//     result = T1 * T2 * G1 * D2 * A_t * cos_ih1
-		// 	* dot_wt_wh2 * dot(wo, wh2) * sqr(rcp_norm_wh2)
-		// 	* rcp(dot(wt, wmi)) * weight / dot(wh1, wmi);
-		// }
+		Float arc_length = sqrt(1.f - e2 * sqr(sin(gamma_mt)));
 		/* integrand_of_S_tt / pdf_of_sampling_wt */
 		Spectrum result = T1 * T2 * D2 * A_t * dot_wt_wh2 * dot(wo, wh2)
 		    * sqr(rcp_norm_wh2) * rcp(dot(wt, wmi)) * weight *
-		    select(distr.sample_visible(), smith_g1(-wt, wmi, wh1) * dot(si.wi, wmi),
+		    select(distr.sample_visible(), smith_g1(-wt, wmi, wh1) * dot(wi, wmi),
 			   G1 * cos_ih1 / dot(wh1, wmi));
 		masked(result, !enoki::isfinite(result)) = 0;
-		S_tt += result;
-	    }
+		S_tt += result * arc_length;
 
+	    }
 
 	TRT:
 	    Point2f sample2 = const_cast<Sampler&>(*m_sampler).next_2d(true);
@@ -667,19 +697,20 @@ public:
 	    Vector3f wtr = reflect(wt, wh2);
 
 	    Float G2 = G(-wt, -wtr, wmt, wh2);
-	    if (G2 == 0 || G_(-wt, -wtr, Normal3f(wmt.x(), 0.f, wmt.z()), wh2) == 0)
+	    if (G2 == 0 || G_(-wt, -wtr, wmt_, wh2) == 0)
 		continue;
 
 	    if (dot(-wtr, wo) < m_inv_eta - 1e-5f) /* total internal reflection */
 		continue;
 
 	    Float phi_tr = dir_phi(wtr);
-	    Float phi_mtr = phi_mi - 2.f * (phi_t - phi_tr) + Pi;
-	    Normal3f wmtr = sph_dir(-m_tilt, phi_mtr);
+	    Float gamma_mtr = gamma_mi - 2.f * (to_phi(phi_t, a, b) - to_phi(phi_tr, a, b)) + Pi;
+	    Normal3f wmtr = sphg_dir(-m_tilt, gamma_mtr, a, b);
+	    Normal3f wmtr_ = sphg_dir(0, gamma_mtr, a, b);
 
 	    Normal3f wh3 = wtr + m_inv_eta * wo;
 	    Float G3 = G(wtr, -wo, wmtr, wh3);
-	    if (dot(wmtr, wh3) < 0 || G3 == 0 || G_(wtr, -wo, Normal3f(wmtr.x(), 0.f, wmtr.z()), wh3) == 0)
+	    if (dot(wmtr, wh3) < 0 || G3 == 0 || G_(wtr, -wo, wmtr_, wh3) == 0)
 		continue;
 
 	    Float rcp_norm_wh3 = rcp(norm(wh3));
@@ -689,157 +720,39 @@ public:
 	    Float T3 = 1.f - std::get<0>(fresnel(cos_trh3, Float(m_inv_eta)));
 
 	    Float D3 = D(wh3, wmtr) * G3;
-	    Spectrum A_tr = exp(mu_a * 2.f * cos(phi_tr - phi_mt) / costheta(wtr));
+	    Point2f ptr = to_point(gamma_mtr + Pi, a, b);
+	     /* divide by 0.05 (or multiply by 20) because the absorption is defined for hair width 0.1 */
+	    Spectrum A_tr = exp(-mu_a * norm(pt - ptr) * 20.f / costheta(wtr));
 
-	    // Spectrum result;
-	    // if (distr.sample_visible()) {
-	    // 	result = T1 * R2 * T3 * smith_g1(-wt, wmi, wh1) * smith_g1(-wtr, wmt, wh2)
-	    // 	    * D3 * cos_trh3 * dot(si.wi, wmi) * dot(wt, wmt)
-	    // 	    * dot(wh3, wo)	* sqr(rcp_norm_wh3) * A_t * A_tr * weight
-	    // 	    / (dot(wt, wmi) * dot(wtr, wmt));
-	    // } else {
-	    // 	result = T1 * R2 * T3 * G1 * G2 * D3 * cos_ih1 * cos_th2 * cos_trh3
-	    // 	    * dot(wh3, -wo)	* sqr(rcp_norm_wh3) * A_t * A_tr * weight
-	    // 	    / (dot(wh1, wmi) * dot(wh2, wmt) * dot(wt, wmi) * dot(wtr, wmt));
-	    // }
 	    Spectrum result = T1 * R2 * T3 * D3 * cos_trh3 * dot(wh3, wo) * sqr(rcp_norm_wh3) *
 		A_t * A_tr * weight / (dot(wt, wmi) * dot(wtr, wmt)) *
 		select(distr.sample_visible(),
-		       smith_g1(-wt, wmi, wh1) * smith_g1(-wtr, wmt, wh2) * dot(si.wi, wmi) * dot(wt, wmt),
+		       smith_g1(-wt, wmi, wh1) * smith_g1(-wtr, wmt, wh2) * dot(wi, wmi) * dot(wt, wmt),
 		       -G1 * G2 * cos_ih1 * cos_th2 / (dot(wh1, wmi) * dot(wh2, wmt)));
+
 	    masked(result, !enoki::isfinite(result)) = 0;
-	    S_trt += result;
+	    Float arc_length = sqrt(1.f - e2 * sqr(sin(gamma_mtr)));
+	    S_trt += result * arc_length;
 	}
-	return (S_tt + S_trt) * 1.f / 3.f * res * sqr(m_inv_eta);
+	Float d_o_inv = rsqrt(1.f - e2 * sqr(sin(phi_o)));
+	return (S_tt + S_trt) * 1.f / 3.f * res * sqr(m_inv_eta) * d_o_inv;
     }
 
     // evaluate bsdf
-    // phi_i == 0
     Spectrum eval(const BSDFContext &ctx, const SurfaceInteraction3f &si,
 		  const Vector3f &wo, Mask active) const override {
 	MTS_MASKED_FUNCTION(ProfilerPhase::BSDFEvaluate, active);
 
-	UnpolarizedSpectrum R = eval_r(si.wi, wo) + eval_tt_trt(si,wo);
+	UnpolarizedSpectrum R = eval_r(si, wo) + eval_tt_trt(si, wo);
 
 	return select(active, R * rcp(cos(dir_theta(si.wi))), 0.f);
     }
 
     Float pdf(const BSDFContext &ctx, const SurfaceInteraction3f &si,
 	      const Vector3f &wo, Mask active) const override {
+	// Not implemented because it is too expensive to compute
 	MTS_MASKED_FUNCTION(ProfilerPhase::BSDFEvaluate, active);
-	// CAUTIOUS: this is only an estimation of the PDF, is now disabled
 	return 1.f;
-
-	// check visibility because of scale tilt
-	Float phi_o = dir_phi(wo);
-	/* dot(wi, wmi) > 0 */
-	Float phi_m_max = acos(max(-m_tan_tilt * tantheta(si.wi), 0));
-	if (enoki::isnan(phi_m_max))
-	    return 0.f;
-	Float phi_m_min = -phi_m_max;
-
-	/* dot(wo, wm) > 0 */
-	Float tmp1 = acos(max(-m_tan_tilt * tantheta(wo), 0));
-	if (enoki::isnan(tmp1))
-	    return 0.f;
-
-	/* absorption */
-	Spectrum wavelengths = get_spectrum(si);
-	Spectrum mu_a = fmadd(m_pheomelanin, pheomelanin(wavelengths),
-					m_eumelanin * eumelanin(wavelengths));
-
-	/* dot(wo, wmi) > 0 */
-	Float phi_m_max_r = tmp1 + phi_o;
-	Float phi_m_min_r = -tmp1 + phi_o;
-
-	Vector3f wh = normalize(si.wi + wo);
-
-	Float pdf_r(0.f), pdf_tt(0.f), pdf_trt(0.f);
-
-	/* Construct a microfacet distribution matching the
-	   roughness values at the current surface position. */
-	MicrofacetDistribution distr(m_type, m_roughness, false);
-
-	/* initial sample resolution */
-	Float res = m_roughness * .8f;
-	Float scale = (phi_m_max - phi_m_min) * .5f;
-	size_t intervals = 2 * ceil(scale/res) + 1;
-	/* modified resolution based on integral domain */
-	res = (phi_m_max - phi_m_min) / Float(intervals);
-	// integrate using Simpson's rule
-	for (size_t i = 0; i < intervals; i++) {
-	    Float phi_mi = phi_m_min + i * res;
-	    Normal3f wmi = sph_dir(m_tilt, phi_mi);
-	    /* R */
-	    /* sample wh1 */
-	    Point2f sample1 = const_cast<Sampler&>(*m_sampler).next_2d(active);
-	    auto [wh1, pdfh1] = sample_wh(si.wi, wmi, distr, sample1);
-	    auto [R1, cos_theta_t1, eta_it1, eta_ti1] = fresnel(dot(si.wi, wh1), Float(m_eta));
-	    /* TT */
-	    Float T1 = 1.f - R1;
-	    Vector3f wt = refract(si.wi, wh1, cos_theta_t1, eta_ti1);
-	    Float phi_t = dir_phi(wt);
-	    Float phi_mt = 2.f * phi_t - phi_mi;
-	    Normal3f wmt = sph_dir(-m_tilt, phi_mt);
-	    /* sample wh2 */
-	    Point2f sample2 = const_cast<Sampler&>(*m_sampler).next_2d(active);
-	    auto [wh2, pdfh2] = sample_wh(-wt, wmt, distr, sample2);
-	    Float R2 = std::get<0>(fresnel(dot(wh2, -wt), Float(m_inv_eta)));
-	    Spectrum At = exp(mu_a * 2.f * cos(phi_t - phi_mi) / costheta(wt));
-	    Float TT = T1 * (1.f - R2) * hmean(At);
-	    /* TRT */
-	    Vector3f wtr = reflect(wt, wh2);
-	    Float phi_tr = dir_phi(wtr);
-	    Float twottrpi = -2.f * (phi_t - phi_tr) + Pi;
-	    Float phi_mtr = phi_mi + twottrpi;
-	    Normal3f wmtr = sph_dir(-m_tilt, phi_mtr);
-	    /* sample wh3 */
-	    Point2f sample3 = const_cast<Sampler&>(*m_sampler).next_2d(active);
-	    auto [wh3, pdfh3] = sample_wh(wtr, wmtr, distr, sample3);
-	    Float T3 = 1.f - std::get<0>(fresnel(dot(wh3, wtr), Float(m_inv_eta)));
-	    Spectrum Atr = exp(mu_a * 2.f * cos(phi_tr - phi_mt) / costheta(wtr));
-	    Float TRT = T1 * R2 * T3 * hmean(At * Atr);
-
-	    Float total_energy = R1 + TT + TRT;
-
-	    if (!(total_energy > 0))
-		continue;
-
-	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1); /* Simpson */
-	    weight *= 0.5f * cos(phi_mi); /* cos(phi)dphi = dh, diameter = 2 */
-
-	    // R
-	    pdf_r += select(phi_mi < phi_m_max_r && phi_mi > phi_m_min_r,
-			    max(0, R1 / total_energy * weight
-				* D(wmi, wh) * smith_g1_visible(si.wi, wmi, wh) * 0.25f),
-			    0.f);
-	    // TT
-	    if (dot(wo, wt) > m_inv_eta) {
-		Normal3f wh2 = -wt + m_inv_eta * wo;
-		Float rcp_norm_wh2 = rcp(norm(wh2));
-		wh2 *= rcp_norm_wh2;
-		Float pdf_h2 = D(wmt, wh2) * smith_g1_visible(-wt, wmt, wh2) * dot(-wt, wh2);
-		Float dwh2_wtt = sqr(m_inv_eta * rcp_norm_wh2) * dot(-wo, wh2);
-		Normal3f wmt_ = sph_dir(0, phi_mt);
-		Float result = TT / total_energy * pdf_h2 * dwh2_wtt * weight * G_(-wt, -wo, wmt_, wh2);
-		masked(result, !enoki::isfinite(result)) = 0;
-		pdf_tt += result;
-	    }
-            // TRT
-	    if (dot(-wtr, wo) > m_inv_eta) {
-		Normal3f wmtr_ = sph_dir(0, phi_mtr);
-		Normal3f wh3 = wtr + m_inv_eta * wo;
-		Float rcp_norm_wh3 = rcp(norm(wh3));
-		wh3 *= rcp_norm_wh3;
-		Float pdf_h3 = D(wmtr, wh3) * smith_g1_visible(wtr, wmtr, wh3) * dot(wtr, wh3);
-		Float dwh3_wtrt = sqr(m_inv_eta * rcp_norm_wh3) * dot(-wo, wh3);
-		Float result = TRT / total_energy * pdf_h3 * dwh3_wtrt * weight * G_(wtr, -wo, wmtr_, wh3);
-		masked(result, !enoki::isfinite(result)) = 0.f;
-		pdf_trt += result;
-	    }
-	}
-
-	return select(active, (pdf_r + pdf_tt + pdf_trt) * (2.f * res / 3.f), 0.f);
     }
 
 
@@ -850,11 +763,10 @@ public:
     std::string to_string() const override {
 	std::ostringstream oss;
 	oss << "RoughHair[" << std::endl
-            << "  distribution = "   << m_type << "," << std::endl
-	    << "  roughness = "      << string::indent(m_roughness) << "," << std::endl
-	    << "  scale tilt = "     << string::indent(-m_tilt) << std::endl
-	    << "  eumelanin = "      << string::indent(m_eumelanin) << ", "  << std::endl
-	    << "  pheomelanin = "    << string::indent(m_pheomelanin) << ", " << std::endl
+            << "  distribution = " << m_type << "," << std::endl
+	    << "  roughness = " << string::indent(m_roughness) << "," << std::endl
+	    << "  eta = " << string::indent(m_eta) << "," << std::endl
+	    << "  scale tilt = " << string::indent(-m_tilt) << std::endl
 	    << "]";
 	return oss.str();
     }
@@ -869,8 +781,6 @@ private:
     ScalarFloat m_roughness, m_roughness_squared;
     /// Hair scale and its tangent
     ScalarFloat m_tilt, m_tan_tilt;
-    /// Whether integrate analytically
-    bool m_analytical;
     /// Sampler for evaluation
     ref<Sampler> m_sampler;
     /// Hair color

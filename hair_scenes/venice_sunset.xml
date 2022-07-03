@@ -32,13 +32,15 @@
     <string name="filename" value="textures/venice_sunset.exr"/>
   </emitter>
 
-  <!-- hair -->
+    <!-- hair -->
   <shape type="hair">
     <transform name="to_world">
       <rotate x="1" angle="-90"/>
-      <translate  y="-5"/>
+      <translate y="-5"/>
       <rotate y="1" angle="90"/>
     </transform>
+    <float name="a" value="0.05"/>
+    <float name="b" value="0.03"/>
     <string name="filename" value="meshes/wCurly.hair"/>
     <bsdf type="roughhair">
       <string name="distribution" value="beckmann"/>
