@@ -533,14 +533,14 @@ public:
 	    /* initial sample resolution */
 	    Float res = m_roughness * .7f;
 	    Float scale = (phi_m_max - phi_m_min) * .5f;
-	    size_t intervals = 2 * ceil(scale/res) + 1;
+	    size_t intervals = 2 * ceil(scale/res);
 	    /* modified resolution based on integral domain */
 	    res = (phi_m_max - phi_m_min) / Float(intervals);
 	    // integrate using Simpson's rule
-	    for (size_t i = 0; i < intervals; i++) {
+	    for (size_t i = 0; i <= intervals; i++) {
 		Float phi_m = phi_m_min + i * res;
 		Vector3f wm = sph_dir(m_tilt, phi_m);
-		Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
+		Float weight = (i == 0 || i == intervals)? 0.5f: (i%2 + 1);
 		integral += weight * D(wm, wh) * G(wi, wo, wm, wh) * G_(wi, wo, Normal3f(wm.x(), 0.f, wm.z()), wh);
 	    }
 	    integral *= (2.f / 3.f * res);
@@ -583,10 +583,10 @@ public:
 	}
 
 	Float scale = (phi_m_max - phi_m_min) * .5f;
-	size_t intervals = 2 * ceil(scale/res) + 1;
+	size_t intervals = 2 * ceil(scale/res);
 	res = (phi_m_max - phi_m_min)/intervals;
 	UnpolarizedSpectrum S_tt = 0.f, S_trt = 0.f;
-	for (size_t i = 0; i < intervals; i++) {
+	for (size_t i = 0; i <= intervals; i++) {
 	    Float phi_mi = phi_m_min + i * res;
 	    Normal3f wmi = sph_dir(m_tilt, phi_mi);
 
@@ -609,7 +609,7 @@ public:
 	    Vector3f wmt = sph_dir(-m_tilt, phi_mt);
 
 	    /* Simpson's rule weight */
-	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
+	    Float weight = (i == 0 || i == intervals)? 0.5f: (i%2 + 1);
 
 	    Normal3f wh2;
 	    Spectrum A_t = exp(mu_a * 2.f * cos(phi_t - phi_mi) / costheta(wt));
