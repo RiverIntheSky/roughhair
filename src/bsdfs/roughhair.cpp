@@ -555,14 +555,14 @@ public:
 	/* initial sample resolution */
 	Float res = m_roughness * .7f;
 	Float scale = (gamma_m_max - gamma_m_min) * .5f;
-	size_t intervals = 2 * ceil(scale/res) + 1;
+	size_t intervals = 2 * ceil(scale/res);
 	/* modified resolution based on integral domain */
 	res = (gamma_m_max - gamma_m_min) / Float(intervals);
 	// integrate using Simpson's rule
-	for (size_t i = 0; i < intervals; i++) {
+	for (size_t i = 0; i <= intervals; i++) {
 	    Float gamma_m = gamma_m_min + i * res;
 	    Vector3f wm = sphg_dir(m_tilt, gamma_m, a, b);
-	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
+	    Float weight = (i == 0 || i == intervals)? 0.5f: (i%2 + 1);
 	    Float arc_length = sqrt(1.f - e2 * sqr(sin(gamma_m)));
 	    integral += weight * D(wm, wh) * G(wi, wo, wm, wh) * arc_length
 		* G_(wi, wo, Normal3f(wm.x(), 0.f, wm.z()), wh);
@@ -620,10 +620,10 @@ public:
 	    gamma_m_max += TwoPi;
 
 	Float scale = (gamma_m_max - gamma_m_min) * .5f;
-	size_t intervals = 2 * ceil(scale/res) + 1;
+	size_t intervals = 2 * ceil(scale/res);
 	res = (gamma_m_max - gamma_m_min)/intervals;
 	UnpolarizedSpectrum S_tt = 0.f, S_trt = 0.f;
-	for (size_t i = 0; i < intervals; i++) {
+	for (size_t i = 0; i <= intervals; i++) {
 	    Float gamma_mi = gamma_m_min + i * res;
 	    Normal3f wmi = sphg_dir(m_tilt, gamma_mi, a, b);
 	    Normal3f wmi_ = sphg_dir(0.f, gamma_mi, a, b);
@@ -648,7 +648,7 @@ public:
 	    Vector3f wmt_ = sphg_dir(0, gamma_mt, a, b);
 
 	    /* Simpson's rule weight */
-	    Float weight = (i == 0 || i == intervals - 1)? 0.5f: (i%2 + 1);
+	    Float weight = (i == 0 || i == intervals)? 0.5f: (i%2 + 1);
 
 	    Normal3f wh2;
 	    Point2f pi = to_point(gamma_mi, a, b);
